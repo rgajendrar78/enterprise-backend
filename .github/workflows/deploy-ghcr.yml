@@ -1,0 +1,115 @@
+name: Deploy
+
+# How to deploy, once. The environment is an input, so staging and production differ by
+# one argument — see docs/DEPLOY.md for the variables each one needs.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment to deploy into.
+        required: true
+        type: string
+
+  # Redeploy the current branch by hand. To roll back, revert the commit and push —
+  # the branch then still says what is running.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy into
+        required: true
+        type: environment
+
+permissions:
+  contents: read
+  packages: write
+
+# Per environment: a staging deploy must never queue behind a production one.
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  APP: enterprise-backend
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    name: Build, publish and restart
+    runs-on: ubuntu-latest
+
+    # Scopes every `vars.*` and `secrets.*` below to this environment, so the same
+    # names carry different values and nothing is duplicated here.
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.APP_URL }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Sign in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two tags: the SHA is what the instance pulls, the environment name is a pointer
+      # you can read to answer "what is on staging?".
+      - name: Build and publish the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ inputs.environment }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image publishes on every run; only the rollout waits for a host.
+      - name: Migrate and restart over SSH
+        if: vars.SSH_HOST != ''
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          install -m 700 -d ~/.ssh
+          install -m 600 /dev/null ~/.ssh/id_deploy
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          SSH="ssh -i ~/.ssh/id_deploy -o BatchMode=yes $SSH_USER@$SSH_HOST"
+
+          # Token on stdin, so it never reaches argv or the instance's process list.
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | $SSH "docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
+          $SSH "APP=$APP IMAGE=$IMAGE:${{ github.sha }} PORT=${{ vars.APP_PORT || '4000' }} bash -s" <<'REMOTE'
+          set -euo pipefail
+          docker pull "$IMAGE"
+
+          # Migrate while the old container still serves. Never at boot: replicas would
+          # race, and a schema failure would look like a restart loop.
+          docker run --rm --env-file "/etc/$APP.env" "$IMAGE" pnpm migration:run:prod
+
+          docker rm -f "$APP" 2>/dev/null || true
+          docker run -d --name "$APP" \
+            --restart unless-stopped \
+            --env-file "/etc/$APP.env" \
+            -p "$PORT:4000" \
+            --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+            "$IMAGE"
+
+          docker image prune -f
+          REMOTE
+
+      # Retried because the container takes a few seconds to pass its own probe.
+      - name: Smoke test
+        if: vars.SSH_HOST != '' && vars.APP_URL != ''
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.APP_URL }}/api/health/ready"

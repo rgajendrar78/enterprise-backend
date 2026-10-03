@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # `npm` is Dependabot's name for the whole Node ecosystem — npm, Yarn, pnpm and Bun.
+  # There is no `pnpm` value; it reads `pnpm-lock.yaml` and opens pnpm-shaped PRs.
+  - package-ecosystem: npm
+    directory: /
+
+    schedule:
+      interval: weekly
+
+    open-pull-requests-limit: 5
+
+    # One PR per group instead of twenty — CI proves the whole set at once.
+    # Majors stay out of the groups: one breaking major would fail the batch and
+    # take every safe patch in it down too. They arrive as their own PR instead.
+    groups:
+      nest:
+        patterns: ["@nestjs/*"]
+        update-types: ["minor", "patch"]
+      dev-tooling:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+
+    schedule:
+      interval: monthly
+
+    groups:
+      actions:
+        patterns: ["*"]

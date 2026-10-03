@@ -1,0 +1,52 @@
+# Shared Postgres + Redis for dev and production.
+#
+# Dev:  docker compose up -d                       (uses defaults)
+# Prod: POSTGRES_PASSWORD=<strong> docker compose up -d  (override the password)
+#
+# The app itself is NOT in this file — dev runs `pnpm dev`, production is
+# deployed as a standalone container by CI/CD.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: enterprise-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise}
+
+    # Loopback: never reachable from the network.
+    ports:
+      - "127.0.0.1:5432:5432"
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: enterprise-redis
+    restart: unless-stopped
+
+    command: ["redis-server", "--appendonly", "yes"]
+
+    ports:
+      - "127.0.0.1:6379:6379"
+
+    volumes:
+      - redis-data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+.git
+.husky
+
+# Never read by a build, but editing one would otherwise invalidate the layer
+# cache and force a full reinstall.
+docs
+.github
+*.md
+
+.env
+.env.*
+!.env.example
+*.log

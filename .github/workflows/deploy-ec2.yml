@@ -1,0 +1,133 @@
+name: Deploy (EC2)
+
+# Build on CI, transfer artifacts, restart via PM2. The environment is an input,
+# so staging and production differ by one argument.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub environment to deploy into.
+        required: true
+        type: string
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy into
+        required: true
+        type: environment
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  APP: enterprise-backend
+
+jobs:
+  deploy:
+    name: Build and deploy to EC2
+    runs-on: ubuntu-latest
+
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ vars.APP_URL }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Deploy to EC2
+        if: vars.SSH_HOST != ''
+        env:
+          SSH_HOST: ${{ vars.SSH_HOST }}
+          SSH_USER: ${{ vars.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          APP_PORT: ${{ vars.APP_PORT || '4000' }}
+        run: |
+          set -euo pipefail
+
+          install -m 700 -d ~/.ssh
+          install -m 600 /dev/null ~/.ssh/id_deploy
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          # 1. Package the artifact locally
+          tar -czf release.tar.gz dist/ ecosystem.config.js package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc scripts/
+
+          SSH="ssh -i ~/.ssh/id_deploy -o BatchMode=yes $SSH_USER@$SSH_HOST"
+          SCP="scp -i ~/.ssh/id_deploy -o BatchMode=yes"
+          TARGET="/var/www/$APP"
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          RELEASE_DIR="$TARGET/releases/$TIMESTAMP"
+
+          # 2. Prepare directories
+          $SSH "mkdir -p $TARGET/releases $TARGET/shared"
+
+          # 3. Transfer the zip payload
+          $SCP release.tar.gz "$SSH_USER@$SSH_HOST:/tmp/release_$TIMESTAMP.tar.gz"
+
+          # 4. Extract, install, migrate, and symlink
+          $SSH "
+            mkdir -p $RELEASE_DIR
+            tar -xzf /tmp/release_$TIMESTAMP.tar.gz -C $RELEASE_DIR
+            rm /tmp/release_$TIMESTAMP.tar.gz
+            
+            if ! (
+              cd $RELEASE_DIR && \
+              pnpm install --prod --frozen-lockfile && \
+              ( [ -f $TARGET/shared/.env ] && cp $TARGET/shared/.env $RELEASE_DIR/.env || true ) && \
+              ( [ -f .env ] && set -a && source .env && set +a ; pnpm migration:run:prod )
+            ); then
+              echo 'Deployment failed! Deleting corrupted release...'
+              rm -rf $RELEASE_DIR
+              exit 1
+            fi
+
+            echo 'Starting Pre-Flight check on Port 9999...'
+            cd $RELEASE_DIR
+            PORT=9999 pm2 start dist/main.js --name preflight-$APP
+            
+            sleep 5
+            
+            if ! curl -fsS http://localhost:9999/api/health/ready; then
+              echo 'Pre-Flight Check FAILED. Code crashed on boot!'
+              pm2 delete preflight-$APP
+              rm -rf $RELEASE_DIR
+              exit 1
+            fi
+
+            echo 'Pre-Flight Check PASSED. Switching live traffic...'
+            pm2 delete preflight-$APP
+
+            ln -sfn $RELEASE_DIR $TARGET/current
+            cd $TARGET/current
+            
+            # Use ecosystem file for True Zero-Downtime Reload
+            PORT=$APP_PORT pm2 reload ecosystem.config.js --update-env || PORT=$APP_PORT pm2 start ecosystem.config.js --update-env
+            pm2 save
+            
+            (ls -1dt $TARGET/releases/* | tail -n +6 | xargs rm -rf || true)
+          "
+
+      - name: Smoke test
+        if: vars.SSH_HOST != '' && vars.APP_URL != ''
+        run: curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "${{ vars.APP_URL }}/api/health/ready"

@@ -1,0 +1,30 @@
+name: Deploy production
+
+# Every merge to `main`, once CI is green on that exact commit. Add required reviewers
+# to the `production` environment and this waits for an approval first.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    name: Production
+    needs: verify
+    # The deploy target. Swap this one line to switch the whole environment:
+    #   deploy.yml       ECR + ECS on EC2 — rolling, auto-rollback (default)
+    #   deploy-ghcr.yml  GHCR + `docker run` on a single EC2 host
+    #   deploy-ec2.yml   tarball + PM2 on a single EC2 host, no registry
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+    # A called workflow can only narrow what the caller grants, so all three targets'
+    # needs are listed: packages for GHCR, id-token for the ECS OIDC exchange.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    secrets: inherit

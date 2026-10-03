@@ -1,0 +1,24 @@
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Every env file except the documented template. `.env.*` also covers
+# .env.local, .env.production and anything else someone invents.
+.env
+.env.*
+!.env.example
+
+# Never commit a credential, whatever it is named.
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editor and OS noise — personal, not project.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+*.log

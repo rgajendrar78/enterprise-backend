@@ -1,0 +1,16 @@
+# Transitive security fixes; delete an entry once the direct dependency ships the patched range.
+overrides:
+  js-yaml@5: ">=5.2.2" # GHSA-pm4m-ph32-ghv5, reached via @nestjs/swagger
+
+# Explicit allow-list of packages permitted to run install scripts.
+allowBuilds:
+  "@scarf/scarf": false # telemetry only
+  unrs-resolver: true # native module resolver used by the eslint plugins
+
+# Refuse versions published less than a day ago (compromised-release window).
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - "@nestjs/*"
+  - "@typescript-eslint/*"
+  - typescript-eslint
+  - knip
